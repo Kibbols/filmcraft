@@ -220,3 +220,42 @@ fn tracks_scroll_up_and_down_with_a_finger() {
     let after = d.harness.state().ui.timeline.v_scroll;
     assert!(after < before, "a drag on a track header scrolls too ({before} -> {after})");
 }
+
+/// Two fingers are never exactly the same distance apart from one frame to the next. A pan must
+/// follow them anyway, not wait for a frame with no pinch at all.
+#[test]
+fn two_finger_pan_follows_fingers_that_wobble() {
+    use egui::{Event, TouchDeviceId, TouchId, TouchPhase, pos2};
+    let mut d = Driver::phone();
+    d.ok("ui.resize", json!({"width": 390, "height": 520}));
+    d.frames(6);
+    let lane_y = {
+        let v2 = d.rect("timeline.track.V2.menu").expect("V2 menu button");
+        v2[1] + v2[3] / 2.0
+    };
+    let touch = |d: &mut Driver, id: u64, phase: TouchPhase, x: f32, y: f32| {
+        d.harness.input_mut().events.push(Event::Touch { device_id: TouchDeviceId(0), id: TouchId(id), phase, pos: pos2(x, y), force: None });
+    };
+    let (pps, start) = {
+        let tv = &d.harness.state().ui.timeline;
+        (tv.pps, tv.scroll)
+    };
+    let (cx, steps, per_step) = (250.0_f32, 20, -5.0_f32); // 100 pt to the left
+    // (a browser reports the pointer for touches too; egui starts a gesture only with a pointer position)
+    d.harness.input_mut().events.push(Event::PointerMoved(pos2(cx, lane_y)));
+    touch(&mut d, 1, TouchPhase::Start, cx - 25.0, lane_y);
+    touch(&mut d, 2, TouchPhase::Start, cx + 25.0, lane_y);
+    d.frames(1);
+    for k in 1..=steps {
+        let wobble = if k % 2 == 0 { 1.5 } else { -1.5 };
+        let x = cx + per_step * k as f32;
+        touch(&mut d, 1, TouchPhase::Move, x - 25.0 - wobble, lane_y);
+        touch(&mut d, 2, TouchPhase::Move, x + 25.0 + wobble, lane_y);
+        d.frames(1);
+    }
+    touch(&mut d, 1, TouchPhase::End, cx - 100.0 - 25.0, lane_y);
+    touch(&mut d, 2, TouchPhase::End, cx - 100.0 + 25.0, lane_y);
+    d.frames(3);
+    let moved = (d.harness.state().ui.timeline.scroll - start) * pps;
+    assert!(moved > 80.0, "two wobbling fingers moved the timeline {moved:.1} of 100 points");
+}

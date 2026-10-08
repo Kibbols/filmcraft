@@ -30,6 +30,8 @@ const COMPACT_CTRL_H: f32 = 32.0;
 const COMPACT_HEADER_W: f32 = 64.0;
 const COMPACT_VIDEO_H: f32 = 42.0;
 const COMPACT_AUDIO_H: f32 = 38.0;
+/// A two-finger spacing change below this (per frame) is hand jitter, not a pinch.
+const TOUCH_ZOOM_DEAD_ZONE: f32 = 0.004;
 
 /// Width of the track-header column.
 pub(crate) fn header_w(app: &FilmcraftApp) -> f32 {
@@ -1808,15 +1810,6 @@ fn wheel_input(ctx: &egui::Context) -> WheelInput {
                 _ => {}
             }
         }
-        // Two fingers on a touch screen: pinch zooms, dragging both fingers scrolls.
-        if let Some(mt) = i.multi_touch() {
-            if mt.zoom_delta.is_finite() && mt.zoom_delta > 0.0 {
-                w.pinch *= mt.zoom_delta;
-            }
-            if mt.translation_delta.x.is_finite() && mt.translation_delta.y.is_finite() {
-                w.delta += mt.translation_delta;
-            }
-        }
         w
     })
 }
@@ -1829,6 +1822,35 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
     let mods = ctx.input(|i| i.modifiers);
     let tool = app.ui.tool;
     let rate = seq.settings.frame_rate;
+
+    // ---- two fingers on a touch screen: the fingers' centre drags the timeline (sideways and up
+    // and down) while their spacing zooms. Both happen in the same frame: fingers are never
+    // exactly the same distance apart from one frame to the next, so a pan that waited for a
+    // frame with no pinch at all would barely move.
+    if let Some(mt) = ctx.input(|i| i.multi_touch()).filter(|mt| rect.contains(mt.center_pos)) {
+        if matches!(app.tl.drag, Some(Drag::Pan { .. })) {
+            app.tl.drag = None; // the first finger's one-finger scroll hands over to the two-finger gesture
+        }
+        let (dx, dy) = (mt.translation_delta.x, mt.translation_delta.y);
+        let c = mt.center_pos;
+        if dx.is_finite() && dy.is_finite() {
+            let v = &mut app.ui.timeline;
+            if (mt.zoom_delta - 1.0).abs() > TOUCH_ZOOM_DEAD_ZONE && mt.zoom_delta.is_finite() && mt.zoom_delta > 0.0 {
+                // zoom about the centre, which also carries it along as the fingers move
+                v.target_pps = (v.target_pps * mt.zoom_delta as f64).clamp(0.05, 24_000.0);
+                app.tl.zoom_anchor = Some((layout.tick_at(c.x - dx).seconds(), c.x));
+            } else {
+                let limit = max_scroll(seq.duration().seconds(), layout.content.width(), v.pps);
+                v.target_scroll = (v.target_scroll - dx as f64 / v.pps).clamp(0.0, limit);
+                v.scroll = v.target_scroll;
+            }
+            if c.y < layout.split_y {
+                v.v_scroll += dy;
+            } else {
+                v.a_scroll -= dy;
+            }
+        }
+    }
 
     // ---- wheel, as in Premiere Pro on macOS (checked in 26.5.2):
     //   wheel            the tracks under the pointer, up and down
