@@ -76,6 +76,24 @@ impl Driver {
         self.rect(id).is_some()
     }
 
+    /// A finger down at (`x`, `y`), moved by (`dx`, `dy`) over `steps` frames, then lifted.
+    fn swipe(&mut self, x: f32, y: f32, dx: f32, dy: f32, steps: usize) {
+        let mut p = egui::pos2(x, y);
+        let push = |d: &mut Self, e: egui::Event| d.harness.input_mut().events.push(e);
+        push(self, egui::Event::PointerMoved(p));
+        self.frames(1);
+        push(self, egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        self.frames(1);
+        for _ in 0..steps {
+            p.x += dx / steps as f32;
+            p.y += dy / steps as f32;
+            push(self, egui::Event::PointerMoved(p));
+            self.frames(1);
+        }
+        push(self, egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        self.frames(2);
+    }
+
     fn snapshot(&mut self, name: &str) {
         let Some(dir) = self.snapshots.clone() else { return };
         self.frames(2);
@@ -177,4 +195,28 @@ fn track_headers_are_a_badge_and_a_three_dot_menu() {
     let before = steps(&mut d);
     d.click("timeline.track.V1.locked");
     assert_eq!(steps(&mut d), before + 1, "locking the track from the menu is one undo step");
+}
+
+#[test]
+fn tracks_scroll_up_and_down_with_a_finger() {
+    let mut d = Driver::phone();
+    // a short window: not every track fits
+    d.ok("ui.resize", json!({"width": 390, "height": 520}));
+    d.frames(6);
+    assert!(d.harness.state().compact);
+    let lane_y = {
+        let v2 = d.rect("timeline.track.V2.menu").expect("V2 menu button");
+        v2[1] + v2[3] / 2.0
+    };
+    let start = d.harness.state().ui.timeline.v_scroll;
+    // drag down on empty lane: the content follows, bringing the higher video tracks into view
+    d.swipe(340.0, lane_y, 0.0, 30.0, 6);
+    let after = d.harness.state().ui.timeline.v_scroll;
+    assert!(after > start, "a drag on empty space scrolls the video tracks ({start} -> {after})");
+    d.snapshot("compact-scrolled");
+    // dragging the header column does the same
+    let before = d.harness.state().ui.timeline.v_scroll;
+    d.swipe(30.0, lane_y, 0.0, -20.0, 5);
+    let after = d.harness.state().ui.timeline.v_scroll;
+    assert!(after < before, "a drag on a track header scrolls too ({before} -> {after})");
 }

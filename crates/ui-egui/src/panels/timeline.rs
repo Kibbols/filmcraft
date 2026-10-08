@@ -125,6 +125,8 @@ pub enum Drag {
     },
     Pan {
         last: Pos2,
+        /// Grabbed below the video / audio divider: scrolls the audio tracks, not the video ones.
+        audio: bool,
     },
     Marquee {
         start: Pos2,
@@ -1116,6 +1118,16 @@ fn compact_header(
 ) {
     let _ = seq;
     let is_video = r.kind == TrackKind::Video;
+    // a drag on the header scrolls the tracks up and down (the badge and the dots sit on top of it)
+    let pan = ui.interact(visible, egui::Id::new(("trackpan", r.track.0)), Sense::drag());
+    if pan.dragged() {
+        let dy = pan.drag_delta().y;
+        if is_video {
+            app.ui.timeline.v_scroll += dy;
+        } else {
+            app.ui.timeline.a_scroll -= dy;
+        }
+    }
     let patched = if is_video { tg.video_dest == Some(r.track) } else { tg.audio_dest == Some(r.track) };
     let targeted = tg.targeted.contains(&r.track);
     // the badge: the track label, blue when targeted
@@ -1895,7 +1907,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
         let t = layout.tick_at(p.x);
         let started = match (tool, h.clone()) {
             (_, Hit::Ruler) => Some(Drag::Scrub),
-            (Tool::Hand, _) => Some(Drag::Pan { last: p }),
+            (Tool::Hand, _) => Some(Drag::Pan { last: p, audio: p.y >= layout.split_y }),
             (Tool::Zoom, _) => {
                 if resp.clicked() {
                     let f = if mods.alt { 1.0 / 2.0 } else { 2.0 };
@@ -1997,7 +2009,10 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
             }
             (_, Hit::Transition { .. }) => None,
             (_, Hit::Empty { .. }) => {
-                if resp.drag_started() {
+                if resp.drag_started() && app.compact {
+                    // on a phone a drag on empty space scrolls (a marquee is hard to use with a finger)
+                    Some(Drag::Pan { last: p, audio: p.y >= layout.split_y })
+                } else if resp.drag_started() {
                     Some(Drag::Marquee { start: p })
                 } else {
                     app.session.state.selection.clear();
@@ -2038,13 +2053,18 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 app.session.set_playhead(tt);
                 Some(Drag::Scrub)
             }
-            Drag::Pan { last } => {
+            Drag::Pan { last, audio } => {
                 let dx = p.x - last.x;
                 let v = &mut app.ui.timeline;
                 v.target_scroll = (v.target_scroll - dx as f64 / v.pps).max(0.0);
                 v.scroll = v.target_scroll;
-                app.ui.timeline.v_scroll += p.y - last.y;
-                Some(Drag::Pan { last: p })
+                // the content follows the finger: the video tracks stack upward from V1, the audio ones downward
+                if audio {
+                    app.ui.timeline.a_scroll -= p.y - last.y;
+                } else {
+                    app.ui.timeline.v_scroll += p.y - last.y;
+                }
+                Some(Drag::Pan { last: p, audio })
             }
             Drag::Move { clips, grab_tick, start_track, .. } => {
                 let raw = rate.snap_nearest(t_here - grab_tick);
