@@ -3,7 +3,7 @@
 //! tab bar along the bottom to switch between them. The dock tree itself is left alone: widen the
 //! window and the saved workspace comes back exactly as it was.
 
-use egui::{Rect, ScrollArea, Sense, Stroke, pos2, vec2};
+use egui::{Rect, Sense, Stroke, pos2, vec2};
 
 use crate::FilmcraftApp;
 use crate::dock::PanelKind;
@@ -18,6 +18,8 @@ pub const LEAVE_WIDTH: f32 = 800.0;
 pub const TAB_BAR_H: f32 = 52.0;
 /// Smallest height of a control egui draws while compact (points).
 const TOUCH_TARGET: f32 = 34.0;
+/// Horizontal room around a tab's label.
+const TAB_PAD: f32 = 26.0;
 
 /// One entry of the tab bar: panels stacked top to bottom, each with a share of the height.
 pub struct View {
@@ -110,43 +112,95 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, body: Rect) {
         panels::show(app, &mut child, *p, r);
     }
 
-    // the tab bar
+    // the tab bar: scrolled by hand, because egui's scroll area loses the drag to the tab buttons
     ui.painter().rect_filled(bar, 0.0, t.header_bg);
     ui.painter().line_segment([bar.left_top(), bar.right_top()], Stroke::new(1.0, egui::Color32::BLACK));
-    let mut bar_ui = ui.new_child(egui::UiBuilder::new().max_rect(bar).id_salt("compact-tabs").layout(egui::Layout::left_to_right(egui::Align::Center)));
-    bar_ui.set_clip_rect(bar);
+    let galleys: Vec<_> = VIEWS
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let active = app.compact_extra.is_none() && i == view_index;
+            ui.painter().layout_no_wrap(v.label.to_string(), Tokens::ui(14.0), if active { t.tab_text_active } else { t.tab_text })
+        })
+        .collect();
+    let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + TAB_PAD).collect();
+    let content_w: f32 = widths.iter().sum();
+    let limit = scroll_limit(content_w, bar.width());
+    // the active tab is kept on screen when it changes (a panel opened from a menu, say)
+    if app.compact_tab_seen != Some(view_index) && app.compact_extra.is_none() {
+        let start: f32 = widths.iter().take(view_index).sum();
+        app.compact_tab_scroll = scroll_into_view(app.compact_tab_scroll, start, start + widths.get(view_index).copied().unwrap_or(0.0), bar.width());
+        app.compact_tab_seen = Some(view_index);
+    }
+    let mut scroll = if app.compact_tab_scroll.is_finite() { app.compact_tab_scroll.clamp(0.0, limit) } else { 0.0 };
+    let bar_painter = ui.painter().with_clip_rect(bar);
     let mut picked = None;
-    ScrollArea::horizontal().id_salt("compact-tabs-scroll").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(
-        &mut bar_ui,
-        |ui| {
-            ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                for (i, v) in VIEWS.iter().enumerate() {
-                    let active = app.compact_extra.is_none() && i == view_index;
-                    let color = if active { t.tab_text_active } else { t.tab_text };
-                    let galley = ui.painter().layout_no_wrap(v.label.to_string(), Tokens::ui(14.0), color);
-                    let (r, resp) = ui.allocate_exact_size(vec2(galley.size().x + 32.0, TAB_BAR_H), Sense::click());
-                    app.auto.add(&format!("compact.tab.{}", v.label.to_ascii_lowercase()), r, v.label);
-                    if resp.is_pointer_button_down_on() {
-                        ui.painter().rect_filled(r, 0.0, t.hover);
-                    }
-                    if active {
-                        ui.painter().line_segment([r.left_top() + vec2(8.0, 1.0), r.right_top() + vec2(-8.0, 1.0)], Stroke::new(2.0, t.accent));
-                    }
-                    ui.painter().galley(r.center() - galley.size() / 2.0, galley, color);
-                    if resp.clicked() {
-                        picked = Some(i);
-                    }
-                }
-            });
-        },
-    );
+    let mut x = bar.min.x - scroll;
+    for (i, (v, galley)) in VIEWS.iter().zip(galleys).enumerate() {
+        let w = widths.get(i).copied().unwrap_or(0.0);
+        let r = Rect::from_min_size(pos2(x, bar.min.y), vec2(w, TAB_BAR_H));
+        x += w;
+        let visible = r.intersect(bar);
+        if visible.width() < 1.0 {
+            continue;
+        }
+        let active = app.compact_extra.is_none() && i == view_index;
+        let resp = ui.interact(visible, egui::Id::new(("compact-tab", v.label)), Sense::click_and_drag());
+        app.auto.add(&format!("compact.tab.{}", v.label.to_ascii_lowercase()), visible, v.label);
+        if resp.dragged() {
+            scroll = (scroll - resp.drag_delta().x).clamp(0.0, limit);
+        }
+        if resp.is_pointer_button_down_on() && !resp.dragged() {
+            bar_painter.rect_filled(visible, 0.0, t.hover);
+        }
+        if active {
+            bar_painter.line_segment([r.left_top() + vec2(8.0, 1.0), r.right_top() + vec2(-8.0, 1.0)], Stroke::new(2.0, t.accent));
+        }
+        let color = if active { t.tab_text_active } else { t.tab_text };
+        bar_painter.galley(r.center() - galley.size() / 2.0, galley, color);
+        if resp.clicked() {
+            picked = Some(i);
+        }
+    }
+    // more tabs to the right: fade the edge and point at them (a tap moves on), so the hidden tabs can be found
+    if scroll < limit - 1.0 {
+        let edge = Rect::from_min_max(pos2(bar.max.x - 40.0, bar.min.y + 2.0), bar.max);
+        let resp = ui.interact(edge, egui::Id::new("compact-tabs-more"), Sense::click());
+        app.auto.add("compact.tabs.more", edge, "More tabs");
+        bar_painter.rect_filled(edge, 0.0, t.header_bg.gamma_multiply(0.92));
+        bar_painter.text(edge.center(), egui::Align2::CENTER_CENTER, "\u{203A}", Tokens::ui(26.0), t.text);
+        if resp.clicked() {
+            scroll = (scroll + bar.width() * 0.6).clamp(0.0, limit);
+        }
+    }
+    app.compact_tab_scroll = scroll;
     if let Some(i) = picked {
         app.compact_view = i;
         app.compact_extra = None;
+        app.compact_tab_seen = Some(i);
         if let Some((p, _)) = VIEWS[i].panels.last() {
             app.ui.focused = *p;
         }
+    }
+}
+
+/// How far the tab bar can scroll: the tabs' width beyond the bar's.
+pub fn scroll_limit(content: f32, view: f32) -> f32 {
+    if content.is_finite() && view.is_finite() { (content - view).max(0.0) } else { 0.0 }
+}
+
+/// The scroll that shows the tab spanning `start..end` (in content coordinates) in a bar `view` wide,
+/// moving as little as possible from `scroll`.
+pub fn scroll_into_view(scroll: f32, start: f32, end: f32, view: f32) -> f32 {
+    if !(scroll.is_finite() && start.is_finite() && end.is_finite() && view.is_finite()) {
+        return 0.0;
+    }
+    if start < scroll {
+        start.max(0.0)
+    } else if end > scroll + view {
+        (end - view).max(0.0)
+    } else {
+        scroll
     }
 }
 
@@ -173,6 +227,17 @@ mod tests {
     fn nonsense_widths_change_nothing() {
         assert!(wants_compact(f32::NAN, true));
         assert!(!wants_compact(f32::NAN, false));
+    }
+
+    #[test]
+    fn tab_scrolling_stays_inside_the_tabs() {
+        assert_eq!(scroll_limit(600.0, 390.0), 210.0);
+        assert_eq!(scroll_limit(300.0, 390.0), 0.0);
+        assert_eq!(scroll_limit(f32::NAN, 390.0), 0.0);
+        assert_eq!(scroll_into_view(0.0, 450.0, 520.0, 390.0), 130.0, "a tab past the right edge scrolls just enough");
+        assert_eq!(scroll_into_view(200.0, 50.0, 120.0, 390.0), 50.0, "a tab past the left edge too");
+        assert_eq!(scroll_into_view(0.0, 100.0, 170.0, 390.0), 0.0, "a visible tab does not move it");
+        assert_eq!(scroll_into_view(f32::NAN, 0.0, 10.0, 390.0), 0.0);
     }
 
     #[test]

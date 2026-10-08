@@ -249,6 +249,9 @@ pub struct FilmcraftApp {
     pub(crate) compact_extra: Option<PanelKind>,
     /// egui's `interact_size` before the compact layout enlarged it.
     pub(crate) compact_saved_interact: Option<egui::Vec2>,
+    /// The compact tab bar's scroll, and the tab it was last scrolled to show.
+    pub(crate) compact_tab_scroll: f32,
+    pub(crate) compact_tab_seen: Option<usize>,
 }
 
 pub struct GpuState {
@@ -434,6 +437,8 @@ impl FilmcraftApp {
             compact_view: 0,
             compact_extra: None,
             compact_saved_interact: None,
+            compact_tab_scroll: 0.0,
+            compact_tab_seen: None,
         }
     }
 
