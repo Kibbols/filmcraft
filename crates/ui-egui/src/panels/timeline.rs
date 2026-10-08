@@ -24,6 +24,27 @@ use crate::theme::Tokens;
 
 const TOP_H: f32 = 58.0; // timecode + toolbar (left) / ruler (right)
 const RULER_H: f32 = 44.0;
+// Compact (phone) layout: the timecode and toolbar get a strip of their own above the ruler, the
+// track headers shrink to a badge and a "⋮" menu, and the tracks are lower.
+const COMPACT_CTRL_H: f32 = 32.0;
+const COMPACT_HEADER_W: f32 = 64.0;
+const COMPACT_VIDEO_H: f32 = 42.0;
+const COMPACT_AUDIO_H: f32 = 38.0;
+
+/// Width of the track-header column.
+pub(crate) fn header_w(app: &FilmcraftApp) -> f32 {
+    if app.compact { COMPACT_HEADER_W } else { app.ui.timeline.header_w }
+}
+
+/// Height of the top block: timecode, toolbar and ruler.
+fn top_h(app: &FilmcraftApp) -> f32 {
+    if app.compact { COMPACT_CTRL_H + RULER_H } else { TOP_H }
+}
+
+/// Video and audio track heights.
+fn track_heights(app: &FilmcraftApp) -> (f32, f32) {
+    if app.compact { (COMPACT_VIDEO_H, COMPACT_AUDIO_H) } else { (app.ui.timeline.video_track_h, app.ui.timeline.audio_track_h) }
+}
 const SCROLLBAR_H: f32 = 17.0;
 const DIVIDER_H: f32 = 5.0;
 const MASTER_H: f32 = 34.0;
@@ -192,9 +213,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     };
     let rate = seq.settings.frame_rate;
     let dt = ctx.input(|i| i.stable_dt).min(0.05) as f64;
-    let header_w = app.ui.timeline.header_w;
-    let content = Rect::from_min_max(pos2(rect.min.x + header_w, rect.min.y + TOP_H), pos2(rect.max.x - 10.0, rect.max.y - SCROLLBAR_H));
-    let ruler = Rect::from_min_max(pos2(content.min.x, rect.min.y + TOP_H - RULER_H), pos2(content.max.x, rect.min.y + TOP_H));
+    let header_w = header_w(app);
+    let top_h = top_h(app);
+    let content = Rect::from_min_max(pos2(rect.min.x + header_w, rect.min.y + top_h), pos2(rect.max.x - 10.0, rect.max.y - SCROLLBAR_H));
+    let ruler = Rect::from_min_max(pos2(content.min.x, rect.min.y + top_h - RULER_H), pos2(content.max.x, rect.min.y + top_h));
     app.last_timeline_width = content.width();
     let painter = ui.painter().clone();
     painter.rect_filled(rect, 0.0, t.panel_bg);
@@ -278,8 +300,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let split_y = tracks_area.min.y + (tracks_area.height() - DIVIDER_H) * app.ui.timeline.split;
     let video_area = Rect::from_min_max(pos2(rect.min.x, tracks_area.min.y), pos2(content.max.x, split_y));
     let audio_area = Rect::from_min_max(pos2(rect.min.x, split_y + DIVIDER_H), pos2(content.max.x, tracks_area.max.y - MASTER_H));
-    let vh = app.ui.timeline.video_track_h;
-    let ah = app.ui.timeline.audio_track_h;
+    let (vh, ah) = track_heights(app);
     let mut rows = Vec::new();
     // Video: V1 at the bottom of the video area, stacking upward; v_scroll shifts up.
     let nv = seq.video_tracks.len();
@@ -411,11 +432,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // master track
     let master = Rect::from_min_max(pos2(rect.min.x, tracks_area.max.y - MASTER_H), pos2(content.max.x, tracks_area.max.y));
     painter.rect_filled(master, 0.0, t.tl_header_bg);
-    painter.text(pos2(rect.min.x + 44.0, master.center().y), Align2::LEFT_CENTER, "Mix", Tokens::ui(11.5), t.text);
+    painter.text(pos2(rect.min.x + if app.compact { 8.0 } else { 44.0 }, master.center().y), Align2::LEFT_CENTER, "Mix", Tokens::ui(11.5), t.text);
     painter.text(
         pos2(rect.min.x + header_w - 12.0, master.center().y),
         Align2::RIGHT_CENTER,
-        format!("{:.1}", seq.master_volume_db),
+        if app.compact { String::new() } else { format!("{:.1}", seq.master_volume_db) },
         Tokens::ui(11.5),
         t.hot_text,
     );
@@ -920,7 +941,7 @@ fn patch_button(ui: &mut egui::Ui, r: Rect, clip: Rect, label: &str, on: bool, s
 
 #[allow(clippy::too_many_arguments)]
 fn draw_headers(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, rows: &[Row], rect: Rect, vclip: Rect, aclip: Rect, t: &Tokens) {
-    let hw = app.ui.timeline.header_w;
+    let hw = header_w(app);
     let tg = app.session.targeting();
     let mut actions: Vec<(String, Value)> = Vec::new();
     let mut vo_action = None;
@@ -937,6 +958,10 @@ fn draw_headers(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, rows:
         p.line_segment([pos2(hrect.min.x, hrect.max.y - 0.5), pos2(hrect.max.x, hrect.max.y - 0.5)], Stroke::new(1.0, t.separator));
         let label = format!("{}{}", if r.kind == TrackKind::Video { "V" } else { "A" }, r.index + 1);
         let btn_rect = |x0: f32| Rect::from_min_max(pos2(hrect.min.x + x0, hrect.min.y + 1.0), pos2(hrect.min.x + x0 + 24.0, hrect.max.y - 2.0));
+        if app.compact {
+            compact_header(app, ui, seq, r, tr, &label, hrect, visible, &tg, &mut actions, t);
+            continue;
+        }
         // 1. source patch (absent when unpatched)
         let patched = if r.kind == TrackKind::Video { tg.video_dest == Some(r.track) } else { tg.audio_dest == Some(r.track) };
         let pr = btn_rect(13.0);
@@ -1072,21 +1097,92 @@ fn draw_headers(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, rows:
     }
 }
 
+/// One track header in the compact layout: a badge that toggles the track's targeting (the
+/// everyday action) and a "⋮" button whose menu holds the rest (source patch, lock, sync lock,
+/// output / mute / solo). The names of the commands are the same as in the full header.
+#[allow(clippy::too_many_arguments)]
+fn compact_header(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    seq: &Sequence,
+    r: &Row,
+    tr: &filmcraft_project::Track,
+    label: &str,
+    hrect: Rect,
+    visible: Rect,
+    tg: &filmcraft_engine::Targeting,
+    actions: &mut Vec<(String, Value)>,
+    t: &Tokens,
+) {
+    let _ = seq;
+    let is_video = r.kind == TrackKind::Video;
+    let patched = if is_video { tg.video_dest == Some(r.track) } else { tg.audio_dest == Some(r.track) };
+    let targeted = tg.targeted.contains(&r.track);
+    // the badge: the track label, blue when targeted
+    let badge = Rect::from_center_size(pos2(hrect.min.x + 18.0, hrect.center().y), vec2(28.0, (hrect.height() - 6.0).clamp(18.0, 30.0)));
+    app.auto.add(&format!("timeline.track.{label}.target"), badge, "Toggle track targeting");
+    if patch_button(ui, badge, visible, label, targeted, true, egui::Id::new(("target", r.track.0)), t).clicked() {
+        actions.push(("timeline.setTargeting".into(), json!({"track": r.track.0, "targeted": !targeted})));
+    }
+    if tr.locked {
+        let p = ui.painter().with_clip_rect(visible);
+        p.rect_filled(Rect::from_min_max(pos2(hrect.max.x - 3.0, hrect.min.y), hrect.max), 0.0, Color32::from_rgb(0x4b, 0x4b, 0x4b));
+    }
+    // the three dots
+    let more = Rect::from_center_size(pos2(hrect.min.x + 47.0, hrect.center().y), vec2(24.0, hrect.height().min(36.0)));
+    let mresp = ui.interact(more.intersect(visible), egui::Id::new(("trackmenu", r.track.0)), Sense::click());
+    app.auto.add(&format!("timeline.track.{label}.menu"), more, "Track options");
+    let p = ui.painter().with_clip_rect(visible);
+    if mresp.hovered() || mresp.is_pointer_button_down_on() {
+        p.rect_filled(more, 4.0, t.hover);
+    }
+    for dy in [-5.0, 0.0, 5.0] {
+        p.circle_filled(more.center() + vec2(0.0, dy), 1.6, t.text_dim);
+    }
+    egui::Popup::menu(&mresp).show(|ui| {
+        ui.set_min_width(190.0);
+        ui.label(egui::RichText::new(format!("{label}  {}", tr.name)).color(t.text_dim));
+        ui.separator();
+        let mut toggle = |ui: &mut egui::Ui, name: &str, on: bool, key: &str, cmd: &str, params: Value| {
+            let resp = ui.selectable_label(on, name);
+            app.auto.add(&format!("timeline.track.{label}.{key}"), resp.rect, name);
+            if resp.clicked() {
+                actions.push((cmd.to_string(), params));
+                ui.close();
+            }
+        };
+        toggle(ui, "Source patch", patched, "sourcePatch", "timeline.setTargeting", json!({"track": r.track.0, "sourcePatch": !patched}));
+        toggle(ui, "Lock track", tr.locked, "locked", "timeline.setTrack", json!({"track": r.track.0, "locked": !tr.locked}));
+        toggle(ui, "Sync lock", tr.sync_lock, "syncLock", "timeline.setTrack", json!({"track": r.track.0, "syncLock": !tr.sync_lock}));
+        if is_video {
+            toggle(ui, "Show output", tr.enabled, "enabled", "timeline.setTrack", json!({"track": r.track.0, "enabled": !tr.enabled}));
+        } else {
+            toggle(ui, "Mute", tr.muted, "muted", "timeline.setTrack", json!({"track": r.track.0, "muted": !tr.muted}));
+            toggle(ui, "Solo", tr.solo, "solo", "timeline.setTrack", json!({"track": r.track.0, "solo": !tr.solo}));
+        }
+    });
+}
+
 fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequence, layout: &Layout, t: &Tokens, seq_id: ItemId) {
     let p = ui.painter().clone();
     let rate = seq.settings.frame_rate;
-    let hw = app.ui.timeline.header_w;
+    let hw = header_w(app);
     let ruler = layout.ruler;
     // background of the whole top block
     p.rect_filled(Rect::from_min_max(rect.min, pos2(rect.max.x, ruler.max.y)), 0.0, t.panel_bg);
     // current timecode: Premiere's big blue timecode
     let tc = format_time(app.session.playhead(), rate, seq.settings.drop_frame, TimeDisplay::Timecode, seq.settings.sample_rate as i64);
-    let tc_rect = Rect::from_min_size(pos2(rect.min.x + 14.0, rect.min.y + 4.0), vec2(hw - 20.0, 20.0));
+    let tc_rect = if app.compact {
+        Rect::from_min_size(pos2(rect.min.x + 10.0, rect.min.y + 6.0), vec2(150.0, 20.0))
+    } else {
+        Rect::from_min_size(pos2(rect.min.x + 14.0, rect.min.y + 4.0), vec2(hw - 20.0, 20.0))
+    };
     p.text(pos2(tc_rect.min.x, tc_rect.center().y), Align2::LEFT_CENTER, &tc, Tokens::timecode(), t.timecode);
     app.auto.add("timeline.timecode", tc_rect, &tc);
     // toolbar: 30 × 30 buttons, "on" = #4b4b4b fill
-    let mut x = rect.min.x + 12.0;
-    let y = rect.min.y + 26.0;
+    // (compact: the buttons sit at the right of the timecode, in the strip above the ruler)
+    let mut x = if app.compact { rect.max.x - 6.0 * 30.0 - 6.0 } else { rect.min.x + 12.0 };
+    let y = if app.compact { rect.min.y + 2.0 } else { rect.min.y + 26.0 };
     let toggles: [(Icon, &str, bool, bool, &str); 6] = [
         (Icon::Nest, "nest", !app.session.state.sequences_as_clips, true, "Insert and overwrite sequences as nests or individual clips"),
         (Icon::Magnet, "snap", app.session.state.snapping, true, "Snap in Timeline (S)"),

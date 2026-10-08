@@ -147,3 +147,34 @@ fn widening_the_window_restores_the_docked_layout() {
     assert!(d.has("panel.Timeline") && d.has("panel.Project") && d.has("panel.Program"), "every docked panel is back");
     assert!(d.has("header.discord"));
 }
+
+#[test]
+fn track_headers_are_a_badge_and_a_three_dot_menu() {
+    let mut d = Driver::phone();
+    // the per-track switches are not on screen all the time...
+    for gone in ["timeline.track.V1.locked", "timeline.track.V1.syncLock", "timeline.track.V1.enabled", "timeline.track.A1.muted", "timeline.track.A1.solo"] {
+        assert!(!d.has(gone), "{gone} should be inside the menu");
+    }
+    // ...the badge and the menu button are, and the rows are low
+    let badge = d.rect("timeline.track.V1.target").expect("V1 badge");
+    let menu = d.rect("timeline.track.V1.menu").expect("V1 menu button");
+    assert!(menu[0] + menu[2] < 70.0, "the header column is narrow: {menu:?}");
+    assert!(badge[3] <= 44.0 && menu[3] <= 44.0, "rows are short: {badge:?} {menu:?}");
+    let v2 = d.rect("timeline.track.V2.menu").expect("V2 menu button");
+    assert!((menu[1] - v2[1]).abs() <= 46.0, "video rows are at most ~42 pt apart: {menu:?} {v2:?}");
+    d.snapshot("compact-timeline");
+    // the menu opens on tap and holds the switches
+    d.click("timeline.track.V1.menu");
+    for item in ["sourcePatch", "locked", "syncLock", "enabled"] {
+        assert!(d.has(&format!("timeline.track.V1.{item}")), "V1 menu lacks {item}");
+    }
+    d.snapshot("compact-track-menu");
+    // using one runs the same command as the full header's button: one undo step
+    let steps = |d: &mut Driver| {
+        let h = d.ok("engine.execute", json!({"command": "history.list", "params": {}}));
+        h["undo"].as_array().map_or(0, Vec::len)
+    };
+    let before = steps(&mut d);
+    d.click("timeline.track.V1.locked");
+    assert_eq!(steps(&mut d), before + 1, "locking the track from the menu is one undo step");
+}
