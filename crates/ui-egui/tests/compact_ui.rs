@@ -221,14 +221,10 @@ fn tracks_scroll_up_and_down_with_a_finger() {
     assert!(after < before, "a drag on a track header scrolls too ({before} -> {after})");
 }
 
-/// Two fingers are never exactly the same distance apart from one frame to the next. A pan must
-/// follow them anyway, not wait for a frame with no pinch at all.
-#[test]
-fn two_finger_pan_follows_fingers_that_wobble() {
+/// Drives two fingers over the timeline: `hold` frames still, then `steps` frames moving the
+/// centre by (`step_x`, `step_y`) a frame with the spacing wobbling by a point or so.
+fn two_fingers(d: &mut Driver, hold: usize, steps: usize, step_x: f32, step_y: f32, spread_per_step: f32) {
     use egui::{Event, TouchDeviceId, TouchId, TouchPhase, pos2};
-    let mut d = Driver::phone();
-    d.ok("ui.resize", json!({"width": 390, "height": 520}));
-    d.frames(6);
     let lane_y = {
         let v2 = d.rect("timeline.track.V2.menu").expect("V2 menu button");
         v2[1] + v2[3] / 2.0
@@ -236,26 +232,81 @@ fn two_finger_pan_follows_fingers_that_wobble() {
     let touch = |d: &mut Driver, id: u64, phase: TouchPhase, x: f32, y: f32| {
         d.harness.input_mut().events.push(Event::Touch { device_id: TouchDeviceId(0), id: TouchId(id), phase, pos: pos2(x, y), force: None });
     };
+    let (cx, cy) = (250.0_f32, lane_y);
+    // (a browser reports the pointer for touches too; egui starts a gesture only with a pointer position)
+    d.harness.input_mut().events.push(Event::PointerMoved(pos2(cx, cy)));
+    touch(d, 1, TouchPhase::Start, cx - 25.0, cy);
+    touch(d, 2, TouchPhase::Start, cx + 25.0, cy);
+    d.frames(1);
+    for _ in 0..hold {
+        touch(d, 1, TouchPhase::Move, cx - 25.0, cy);
+        touch(d, 2, TouchPhase::Move, cx + 25.0, cy);
+        d.frames(1);
+    }
+    for k in 1..=steps {
+        let wobble = if k % 2 == 0 { 1.5 } else { -1.5 };
+        let (x, y) = (cx + step_x * k as f32, cy + step_y * k as f32);
+        let half = 25.0 + spread_per_step * k as f32 + wobble;
+        touch(d, 1, TouchPhase::Move, x - half, y);
+        touch(d, 2, TouchPhase::Move, x + half, y);
+        d.frames(1);
+    }
+    let (x, y) = (cx + step_x * steps as f32, cy + step_y * steps as f32);
+    touch(d, 1, TouchPhase::End, x - 25.0, y);
+    touch(d, 2, TouchPhase::End, x + 25.0, y);
+    d.frames(3);
+}
+
+fn short_phone() -> Driver {
+    let mut d = Driver::phone();
+    d.ok("ui.resize", json!({"width": 390, "height": 520}));
+    d.frames(6);
+    d
+}
+
+/// Hold two fingers still (a frame is a quarter second in the test harness), then move: scrolls,
+/// however much the fingers wobble.
+#[test]
+fn two_fingers_held_then_moved_scroll_the_timeline() {
+    let mut d = short_phone();
     let (pps, start) = {
         let tv = &d.harness.state().ui.timeline;
         (tv.pps, tv.scroll)
     };
-    let (cx, steps, per_step) = (250.0_f32, 20, -5.0_f32); // 100 pt to the left
-    // (a browser reports the pointer for touches too; egui starts a gesture only with a pointer position)
-    d.harness.input_mut().events.push(Event::PointerMoved(pos2(cx, lane_y)));
-    touch(&mut d, 1, TouchPhase::Start, cx - 25.0, lane_y);
-    touch(&mut d, 2, TouchPhase::Start, cx + 25.0, lane_y);
-    d.frames(1);
-    for k in 1..=steps {
-        let wobble = if k % 2 == 0 { 1.5 } else { -1.5 };
-        let x = cx + per_step * k as f32;
-        touch(&mut d, 1, TouchPhase::Move, x - 25.0 - wobble, lane_y);
-        touch(&mut d, 2, TouchPhase::Move, x + 25.0 + wobble, lane_y);
-        d.frames(1);
-    }
-    touch(&mut d, 1, TouchPhase::End, cx - 100.0 - 25.0, lane_y);
-    touch(&mut d, 2, TouchPhase::End, cx - 100.0 + 25.0, lane_y);
-    d.frames(3);
-    let moved = (d.harness.state().ui.timeline.scroll - start) * pps;
-    assert!(moved > 80.0, "two wobbling fingers moved the timeline {moved:.1} of 100 points");
+    two_fingers(&mut d, 3, 20, -5.0, 0.0, 0.0); // 100 pt to the left
+    let tv = &d.harness.state().ui.timeline;
+    let moved = (tv.scroll - start) * pps;
+    assert!(moved > 80.0, "held then moved: the timeline followed {moved:.1} of 100 points");
+    assert!((tv.pps - pps).abs() < 1e-9, "and did not zoom ({pps} -> {})", tv.pps);
+}
+
+/// Moving straight away without a pinch does nothing, wobble or not: no scroll, no zoom.
+#[test]
+fn two_fingers_swiped_at_once_do_nothing() {
+    let mut d = short_phone();
+    let (pps, start) = {
+        let tv = &d.harness.state().ui.timeline;
+        (tv.pps, tv.scroll)
+    };
+    // (a test frame is a quarter second, so a real swipe is a few big steps)
+    two_fingers(&mut d, 0, 5, -20.0, 0.0, 0.0);
+    let tv = &d.harness.state().ui.timeline;
+    assert_eq!(tv.target_pps, pps, "no zoom");
+    assert!((tv.target_scroll - start).abs() < 1e-9, "no scroll ({start} -> {})", tv.target_scroll);
+}
+
+/// Spreading the fingers is a pinch: it zooms, and never scrolls.
+#[test]
+fn two_fingers_moved_at_once_zoom_and_do_not_scroll() {
+    let mut d = short_phone();
+    let (pps, start) = {
+        let tv = &d.harness.state().ui.timeline;
+        (tv.pps, tv.scroll)
+    };
+    two_fingers(&mut d, 0, 12, -3.0, 0.0, 4.0); // spreading, while the centre drifts left
+    let tv = &d.harness.state().ui.timeline;
+    assert!(tv.target_pps > pps * 1.5, "spreading fingers zoom in ({pps} -> {})", tv.target_pps);
+    assert!((tv.target_scroll - start).abs() * pps < 5.0 || tv.target_pps != pps, "and the drift is not a scroll");
+    let v = tv.v_scroll;
+    assert!(v.abs() < 1.0, "nor does it scroll up or down");
 }

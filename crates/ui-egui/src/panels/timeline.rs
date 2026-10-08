@@ -30,8 +30,69 @@ const COMPACT_CTRL_H: f32 = 32.0;
 const COMPACT_HEADER_W: f32 = 64.0;
 const COMPACT_VIDEO_H: f32 = 42.0;
 const COMPACT_AUDIO_H: f32 = 38.0;
-/// A two-finger spacing change below this (per frame) is hand jitter, not a pinch.
-const TOUCH_ZOOM_DEAD_ZONE: f32 = 0.004;
+/// Two fingers held about still this long (seconds) start scrolling; moving first means zooming.
+const FINGERS_HOLD_SECS: f64 = 0.35;
+/// How far the fingers' centre may drift (points) while "holding still".
+const FINGERS_HOLD_SLOP: f32 = 10.0;
+/// How much the fingers' spacing must change (as a ratio, overall) before it counts as a pinch.
+/// Fingers wobble a few percent on their own.
+const FINGERS_PINCH_SLOP: f32 = 0.15;
+
+/// What a two-finger gesture on the timeline does. Decided once, when the fingers land, so a hand
+/// that wobbles never turns a scroll into a zoom or the other way round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FingerMode {
+    /// The fingers are down and have not been held still or pinched enough to say. Nothing moves.
+    Undecided,
+    /// Held still first, then moved: the fingers' centre drags the timeline.
+    Scroll,
+    /// Pinched (their spacing changed clearly): the timeline zooms with it.
+    Zoom,
+}
+
+/// A two-finger gesture: where and when it began, the zoom it started from, and what it has
+/// turned out to be.
+#[derive(Clone, Copy, Debug)]
+pub struct Fingers {
+    start: f64,
+    origin: Pos2,
+    start_pps: f64,
+    pinch: f32,
+    moved_early: bool,
+    pub mode: FingerMode,
+}
+
+impl Fingers {
+    pub fn new(now: f64, center: Pos2, pps: f64) -> Self {
+        Fingers { start: now, origin: center, start_pps: pps, pinch: 1.0, moved_early: false, mode: FingerMode::Undecided }
+    }
+
+    /// The fingers' spacing now, relative to when they landed (1 = unchanged).
+    pub fn pinch(&self) -> f32 {
+        self.pinch
+    }
+
+    /// Feed one frame (`now` in seconds, the fingers' `center`, this frame's `zoom_delta`); returns
+    /// the mode, which never changes once it is Scroll or Zoom.
+    pub fn update(&mut self, now: f64, center: Pos2, zoom_delta: f32) -> FingerMode {
+        if zoom_delta.is_finite() && zoom_delta > 0.0 {
+            self.pinch = (self.pinch * zoom_delta).clamp(1e-3, 1e3);
+        }
+        if self.mode != FingerMode::Undecided {
+            return self.mode;
+        }
+        let moved = (center - self.origin).length();
+        if !moved.is_finite() || moved > FINGERS_HOLD_SLOP {
+            self.moved_early = true; // these fingers are going somewhere without having held still
+        }
+        if (self.pinch - 1.0).abs() > FINGERS_PINCH_SLOP {
+            self.mode = FingerMode::Zoom;
+        } else if !self.moved_early && now - self.start >= FINGERS_HOLD_SECS {
+            self.mode = FingerMode::Scroll;
+        }
+        self.mode
+    }
+}
 
 /// Width of the track-header column.
 pub(crate) fn header_w(app: &FilmcraftApp) -> f32 {
@@ -71,6 +132,8 @@ pub struct TlState {
     /// display gain: scanning the whole source per clip per frame cost more than drawing.
     peak_max: HashMap<ItemId, (usize, f32)>,
     zoom_anchor: Option<(f64, f32)>,
+    /// The two-finger gesture under way, if any.
+    fingers: Option<Fingers>,
 }
 
 impl TlState {
@@ -1823,33 +1886,48 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
     let tool = app.ui.tool;
     let rate = seq.settings.frame_rate;
 
-    // ---- two fingers on a touch screen: the fingers' centre drags the timeline (sideways and up
-    // and down) while their spacing zooms. Both happen in the same frame: fingers are never
-    // exactly the same distance apart from one frame to the next, so a pan that waited for a
-    // frame with no pinch at all would barely move.
+    // ---- two fingers on a touch screen. Hold them still for a moment and the timeline scrolls
+    // with them (sideways and up and down); start moving straight away and it zooms about the
+    // fingers instead. The choice is made once per gesture (see `FingerMode`): fingers are never
+    // exactly the same distance apart from one frame to the next, so guessing frame by frame
+    // mixed the two up.
     if let Some(mt) = ctx.input(|i| i.multi_touch()).filter(|mt| rect.contains(mt.center_pos)) {
         if matches!(app.tl.drag, Some(Drag::Pan { .. })) {
             app.tl.drag = None; // the first finger's one-finger scroll hands over to the two-finger gesture
         }
+        let now = ctx.input(|i| i.time);
+        let f = app.tl.fingers.get_or_insert_with(|| Fingers::new(now, mt.center_pos, app.ui.timeline.target_pps));
+        let was = f.mode;
+        let mode = f.update(now, mt.center_pos, mt.zoom_delta);
+        let (origin_x, start_pps, pinch) = (f.origin.x, f.start_pps, f.pinch());
         let (dx, dy) = (mt.translation_delta.x, mt.translation_delta.y);
-        let c = mt.center_pos;
-        if dx.is_finite() && dy.is_finite() {
-            let v = &mut app.ui.timeline;
-            if (mt.zoom_delta - 1.0).abs() > TOUCH_ZOOM_DEAD_ZONE && mt.zoom_delta.is_finite() && mt.zoom_delta > 0.0 {
-                // zoom about the centre, which also carries it along as the fingers move
-                v.target_pps = (v.target_pps * mt.zoom_delta as f64).clamp(0.05, 24_000.0);
-                app.tl.zoom_anchor = Some((layout.tick_at(c.x - dx).seconds(), c.x));
-            } else {
+        match mode {
+            FingerMode::Undecided => ctx.request_repaint(), // time passes while the fingers rest
+            FingerMode::Scroll if dx.is_finite() && dy.is_finite() => {
+                if was != FingerMode::Scroll {
+                    app.ui.status = "Scrolling: move both fingers".into();
+                }
+                ui.painter().rect_stroke(rect.shrink(1.0), 2.0, Stroke::new(2.0, app.tokens.accent), StrokeKind::Inside);
+                let v = &mut app.ui.timeline;
                 let limit = max_scroll(seq.duration().seconds(), layout.content.width(), v.pps);
                 v.target_scroll = (v.target_scroll - dx as f64 / v.pps).clamp(0.0, limit);
                 v.scroll = v.target_scroll;
+                if mt.center_pos.y < layout.split_y {
+                    v.v_scroll += dy;
+                } else {
+                    v.a_scroll -= dy;
+                }
             }
-            if c.y < layout.split_y {
-                v.v_scroll += dy;
-            } else {
-                v.a_scroll -= dy;
+            FingerMode::Zoom => {
+                // the zoom the fingers started from, scaled by how far they have spread since: wobble
+                // in the spacing comes and goes instead of adding up. About where they landed.
+                app.ui.timeline.target_pps = (start_pps * pinch as f64).clamp(0.05, 24_000.0);
+                app.tl.zoom_anchor = Some((layout.tick_at(origin_x).seconds(), origin_x));
             }
+            _ => {}
         }
+    } else {
+        app.tl.fingers = None;
     }
 
     // ---- wheel, as in Premiere Pro on macOS (checked in 26.5.2):
@@ -2373,5 +2451,73 @@ mod waveform_tests {
         assert!(waveform_display_gain(0.0, 0.0).is_finite());
         // clip gain still applies
         assert!((db(waveform_display_gain(1.0, -6.0)) - (-6.0)).abs() < 0.1);
+    }
+}
+
+#[cfg(test)]
+mod finger_tests {
+    use super::{FingerMode, Fingers};
+    use egui::pos2;
+
+    fn fingers(at: (f32, f32)) -> Fingers {
+        Fingers::new(10.0, pos2(at.0, at.1), 11.0)
+    }
+
+    #[test]
+    fn holding_still_then_moving_scrolls() {
+        let mut f = fingers((200.0, 300.0));
+        assert_eq!(f.update(10.1, pos2(201.0, 300.0), 1.001), FingerMode::Undecided, "too early to say");
+        assert_eq!(f.update(10.4, pos2(203.0, 301.0), 0.999), FingerMode::Scroll, "held about still long enough");
+        // from here on nothing changes the mind, however the fingers move or spread
+        assert_eq!(f.update(10.5, pos2(260.0, 380.0), 1.3), FingerMode::Scroll);
+        assert_eq!(f.update(10.6, pos2(260.0, 380.0), 0.5), FingerMode::Scroll);
+    }
+
+    #[test]
+    fn pinching_zooms_and_stays_zoom() {
+        let mut f = fingers((200.0, 300.0));
+        assert_eq!(f.update(10.05, pos2(200.0, 300.0), 1.10), FingerMode::Undecided, "10% is wobble");
+        assert_eq!(f.update(10.10, pos2(200.0, 300.0), 1.10), FingerMode::Zoom, "21% overall is a pinch");
+        assert!((f.pinch() - 1.21).abs() < 1e-3);
+        assert_eq!(f.update(11.0, pos2(200.0, 300.0), 1.0), FingerMode::Zoom, "holding afterwards does not turn it into a scroll");
+    }
+
+    #[test]
+    fn moving_at_once_without_a_pinch_does_nothing() {
+        let mut f = fingers((200.0, 300.0));
+        assert_eq!(f.update(10.05, pos2(240.0, 300.0), 1.0), FingerMode::Undecided);
+        // keeping still afterwards must not turn the swipe into a scroll later either
+        assert_eq!(f.update(11.0, pos2(240.0, 300.0), 1.0), FingerMode::Undecided);
+        // but a pinch can still follow
+        assert_eq!(f.update(11.1, pos2(240.0, 300.0), 1.3), FingerMode::Zoom);
+    }
+
+    #[test]
+    fn wobbling_fingers_stay_what_they_were() {
+        // a hold with the spacing wobbling +-6% a frame is still a hold
+        let mut f = fingers((200.0, 300.0));
+        let mut m = FingerMode::Undecided;
+        for k in 0..10 {
+            let wobble = if k % 2 == 0 { 1.06 } else { 1.0 / 1.06 };
+            m = f.update(10.0 + k as f64 * 0.05, pos2(200.0 + (k % 3) as f32, 300.0), wobble);
+        }
+        assert_eq!(m, FingerMode::Scroll);
+        // and a quick swipe with the same wobble neither scrolls nor zooms
+        let mut f = fingers((200.0, 300.0));
+        let mut m = FingerMode::Undecided;
+        for k in 0..20 {
+            let wobble = if k % 2 == 0 { 1.06 } else { 1.0 / 1.06 };
+            m = f.update(10.0 + k as f64 * 0.05, pos2(200.0 + 5.0 * k as f32, 300.0), wobble);
+        }
+        assert_eq!(m, FingerMode::Undecided);
+    }
+
+    #[test]
+    fn nonsense_input_does_not_panic() {
+        let mut f = fingers((0.0, 0.0));
+        let _ = f.update(f64::NAN, pos2(f32::NAN, 1.0), f32::INFINITY);
+        let _ = f.update(1.0, pos2(f32::INFINITY, f32::NAN), f32::NAN);
+        let _ = f.update(2.0, pos2(0.0, 0.0), 0.0);
+        assert!(f.pinch().is_finite());
     }
 }
