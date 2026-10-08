@@ -23,7 +23,15 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
     }
-    let mut x = rect.min.x + if app.integrated_titlebar { 104.0 } else { 14.0 };
+    let compact = app.compact;
+    let mut x = rect.min.x
+        + if app.integrated_titlebar {
+            104.0
+        } else if compact {
+            8.0
+        } else {
+            14.0
+        };
     // Home
     let home = Rect::from_center_size(pos2(x + 10.0, rect.center().y), vec2(26.0, 26.0));
     let hresp = ui.interact(home, egui::Id::new("hdr-home"), Sense::click()).on_hover_text("Home");
@@ -35,7 +43,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if hresp.clicked() {
         app.ui.mode = Mode::Import;
     }
-    x = home.max.x + 16.0;
+    x = home.max.x + if compact { 10.0 } else { 16.0 };
     // Mode tabs (14 pt; active = primary text with a 2 pt underline under the label)
     for (m, label) in [(Mode::Import, "Import"), (Mode::Edit, "Edit"), (Mode::Export, "Export")] {
         let active = app.ui.mode == m;
@@ -52,11 +60,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if resp.clicked() {
             app.ui.mode = m;
         }
-        x += gw + 24.0;
+        x += gw + if compact { 18.0 } else { 24.0 };
     }
     let mut left_end = x;
     // In-window menus when there is no native menu bar.
-    if app.ui.show_menu_bar {
+    if app.ui.show_menu_bar && !compact {
         let menu_rect = Rect::from_min_max(pos2(x + 6.0, rect.min.y + 7.0), pos2(x + 520.0, rect.max.y - 7.0));
         let mut mu = ui.new_child(egui::UiBuilder::new().max_rect(menu_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
         mu.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
@@ -80,36 +88,43 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         icons::paint(ui.painter(), r.shrink(6.0), icon, if resp.hovered() { t.text } else { t.text_dim });
         resp
     };
-    if btn(ui, Icon::Fullscreen, "fullscreen", "Full screen", app).clicked() {
+    // On a phone only Quick Export and Workspaces fit; the rest are in the menus.
+    if !compact && btn(ui, Icon::Fullscreen, "fullscreen", "Full screen", app).clicked() {
         let fs = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
     }
-    if btn(ui, Icon::Speaker, "volume", "Volume", app).clicked() {
+    if !compact && btn(ui, Icon::Speaker, "volume", "Volume", app).clicked() {
         app.ui.status = "Master volume: use the Audio Track Mixer".into();
     }
-    if btn(ui, Icon::Search, "search", "Search", app).clicked() {
+    if !compact && btn(ui, Icon::Search, "search", "Search", app).clicked() {
         app.show_panel(crate::dock::PanelKind::Effects);
     }
-    if btn(ui, Icon::Bell, "notifications", "Progress", app).clicked() {
+    if !compact && btn(ui, Icon::Bell, "notifications", "Progress", app).clicked() {
         app.ui.mode = Mode::Export;
     }
     // Quick Export: a popup with File Name & Location, a preset list and Export (Premiere 26)
-    let qx = rect.max.x - 14.0 - 4.0 * 38.0; // the fifth button from the right
+    let qx = rect.max.x - 14.0 - if compact { 0.0 } else { 4.0 * 38.0 }; // the fifth button from the right (the first, compact)
     if btn(ui, Icon::Export, "quickExport", "Quick Export", app).clicked() {
         app.ui.export.quick_open = !app.ui.export.quick_open;
         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("quick-export-toggled"), true));
     }
-    crate::panels::export_mode::quick_export(app, ui.ctx(), pos2(qx - 340.0, rect.max.y + 4.0));
+    crate::panels::export_mode::quick_export(app, ui.ctx(), pos2((qx - 340.0).max(rect.min.x + 4.0), rect.max.y + 4.0));
     let ws_resp = btn(ui, Icon::Workspaces, "workspaces", "Workspaces", app);
     // workspace name (caps)
-    let ws = app.ui.workspace.to_uppercase();
+    let menu_resp = compact.then(|| btn(ui, Icon::Hamburger, "menu", "Menu", app));
+    let ws = if compact { String::new() } else { app.ui.workspace.to_uppercase() };
     let wg = p.layout_no_wrap(ws.clone(), Tokens::ui(11.0), t.text_dim);
-    let wr = Rect::from_min_size(pos2(rx - wg.size().x + 10.0, rect.center().y - 10.0), vec2(wg.size().x + 8.0, 20.0));
+    // (compact: no name, so no rect to hit)
+    let wr = if compact {
+        Rect::from_min_size(rect.min, vec2(0.0, 0.0))
+    } else {
+        Rect::from_min_size(pos2(rx - wg.size().x + 10.0, rect.center().y - 10.0), vec2(wg.size().x + 8.0, 20.0))
+    };
     let wresp = ui.interact(wr, egui::Id::new("hdr-ws-name"), Sense::click());
     app.auto.add("header.workspaceName", wr, &ws);
     p.galley_with_override_text_color(pos2(wr.min.x + 4.0, rect.center().y - wg.size().y / 2.0), wg, if wresp.hovered() { t.text } else { t.text_dim });
     // Community: a labelled Discord button, always one click away.
-    {
+    if !compact {
         let label = "Discord";
         let g = p.layout_no_wrap(label.to_string(), Tokens::ui(12.0), Color32::WHITE);
         let w = g.size().x + 34.0;
@@ -146,7 +161,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     let open = ui.ctx().data(|d| d.get_temp::<bool>(popup_id).unwrap_or(false));
     if open {
-        let anchor = pos2(wr.min.x, rect.max.y + 4.0);
+        let anchor = pos2(if compact { (rect.max.x - 230.0).max(rect.min.x + 4.0) } else { wr.min.x }, rect.max.y + 4.0);
         let area = egui::Area::new(popup_id.with("area")).order(egui::Order::Foreground).fixed_pos(anchor).show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(220.0);
@@ -167,6 +182,24 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         });
         if area.response.clicked_elsewhere() && !(ws_resp.clicked() || wresp.clicked()) {
             ui.ctx().data_mut(|d| d.insert_temp(popup_id, false));
+        }
+    }
+    // Compact: the menus have no room in the header, so the hamburger opens them as a strip under it.
+    if let Some(menu) = menu_resp {
+        let menu_id = egui::Id::new("compact-menu-open");
+        let was = ui.ctx().data(|d| d.get_temp::<bool>(menu_id).unwrap_or(false));
+        let open = if menu.clicked() { !was } else { was };
+        ui.ctx().data_mut(|d| d.insert_temp(menu_id, open));
+        if open {
+            let strip = egui::Area::new(menu_id.with("area")).order(egui::Order::Foreground).fixed_pos(pos2(rect.min.x, rect.max.y)).show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width((rect.width() - 16.0).max(0.0));
+                    egui::ScrollArea::horizontal().id_salt("compact-menu-scroll").show(ui, |ui| crate::menus::menu_bar(app, ui));
+                });
+            });
+            if strip.response.clicked_elsewhere() && !menu.clicked() && !ui.ctx().any_popup_open() {
+                ui.ctx().data_mut(|d| d.insert_temp(menu_id, false));
+            }
         }
     }
 }

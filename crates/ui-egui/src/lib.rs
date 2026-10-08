@@ -8,6 +8,7 @@
 
 pub mod automation;
 pub mod brand;
+pub mod compact;
 pub mod control;
 pub mod crash;
 pub mod credits;
@@ -240,6 +241,14 @@ pub struct FilmcraftApp {
     pub workspaces: dock::WorkspacePrefs,
     /// Workspace names and the current one, as last handed to the native menu.
     menu_workspaces: (Vec<String>, String),
+    /// Phone-width layout: one view at a time with a bottom tab bar (see [`compact`]).
+    pub compact: bool,
+    /// The tab shown in the compact layout (index into [`compact::VIEWS`]), and a panel shown
+    /// instead of it when it is in no tab.
+    pub(crate) compact_view: usize,
+    pub(crate) compact_extra: Option<PanelKind>,
+    /// egui's `interact_size` before the compact layout enlarged it.
+    pub(crate) compact_saved_interact: Option<egui::Vec2>,
 }
 
 pub struct GpuState {
@@ -421,6 +430,10 @@ impl FilmcraftApp {
             workspace_restored: false,
             workspaces,
             menu_workspaces: Default::default(),
+            compact: false,
+            compact_view: 0,
+            compact_extra: None,
+            compact_saved_interact: None,
         }
     }
 
@@ -608,6 +621,7 @@ impl FilmcraftApp {
         }
         self.ui.dock.activate(p);
         self.ui.focused = p;
+        compact::reveal(self, p);
     }
 
     /// Reveal in Project: bring the Project panel forward, showing the bin that holds `item` with
@@ -1211,9 +1225,11 @@ impl FilmcraftApp {
                     self.timeline_view_of = None;
                     self.ui.dock.restore_timeline();
                     self.ui.dock.activate(PanelKind::Timeline);
+                    compact::reveal(self, PanelKind::Timeline);
                 }
                 filmcraft_engine::Event::OpenSource(_) => {
                     self.ui.dock.activate(PanelKind::Source);
+                    compact::reveal(self, PanelKind::Source);
                 }
                 filmcraft_engine::Event::RevealInProject(item) => self.reveal_in_project(item),
                 filmcraft_engine::Event::Toast { message, .. } => self.toast = Some((message, ctx.input(|i| i.time))),
@@ -1234,6 +1250,7 @@ impl FilmcraftApp {
         self.advance_playback(&ctx);
         let t = self.tokens;
         let full = ui.max_rect();
+        compact::update(self, &ctx, full.width());
         ui.painter().rect_filled(full, 0.0, t.app_bg);
         let header_h = 38.0;
         let header = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), header_h));
@@ -1340,6 +1357,10 @@ impl FilmcraftApp {
     }
 
     fn dock_area(&mut self, ui: &mut egui::Ui, body: egui::Rect) {
+        if self.compact {
+            compact::show(self, ui, body);
+            return;
+        }
         let t = self.tokens;
         // Maximize or Restore Frame (` / Shift+`): the maximized panel fills the dock area.
         let maximized = self.ui.keys.maximized.filter(|p| self.ui.dock.contains(*p));

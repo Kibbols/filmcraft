@@ -1700,6 +1700,15 @@ fn wheel_input(ctx: &egui::Context) -> WheelInput {
                 _ => {}
             }
         }
+        // Two fingers on a touch screen: pinch zooms, dragging both fingers scrolls.
+        if let Some(mt) = i.multi_touch() {
+            if mt.zoom_delta.is_finite() && mt.zoom_delta > 0.0 {
+                w.pinch *= mt.zoom_delta;
+            }
+            if mt.translation_delta.x.is_finite() && mt.translation_delta.y.is_finite() {
+                w.delta += mt.translation_delta;
+            }
+        }
         w
     })
 }
@@ -1782,7 +1791,9 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
     }
 
     // ---- press
-    if resp.drag_started() || (resp.clicked() && app.tl.drag.is_none()) {
+    // (a second finger turns the gesture into pinch / scroll, handled above, not a new edit)
+    let two_fingers = ctx.input(|i| i.multi_touch().is_some());
+    if !two_fingers && (resp.drag_started() || (resp.clicked() && app.tl.drag.is_none())) {
         let Some(p) = resp.interact_pointer_pos() else { return };
         let h = hit(seq, layout, p);
         let t = layout.tick_at(p.x);
